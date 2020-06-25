@@ -33,9 +33,9 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 @ConfigurationProperties("embedded.cassandra")
 public class CassandraProperties extends CommonContainerProperties {
     public static final String BEAN_NAME_EMBEDDED_CASSANDRA = "embeddedCassandra";
+    public static final String DEFAULT_DATACENTER = "datacenter1";
     public String dockerImage = "cassandra:3.11.6";
     public String host = "localhost";
     public int port = 9042;
-    public String datacenter = "datacenter1";
     public String keyspaceName = "embedded";
 }

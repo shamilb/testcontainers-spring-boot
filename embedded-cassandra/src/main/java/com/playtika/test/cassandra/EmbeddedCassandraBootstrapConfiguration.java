@@ -23,75 +23,76 @@
  */
 package com.playtika.test.cassandra;
 
-import com.datastax.oss.driver.api.core.CqlSession;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.autoconfigure.AutoConfigureOrder;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.core.Ordered;
 import org.springframework.core.env.ConfigurableEnvironment;
 import org.springframework.core.env.MapPropertySource;
-import org.testcontainers.containers.FixedHostPortGenericContainer;
+import org.springframework.core.io.ResourceLoader;
+import org.testcontainers.containers.CassandraContainer;
 import org.testcontainers.containers.GenericContainer;
 
-import java.net.InetSocketAddress;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 import static com.playtika.test.cassandra.CassandraProperties.BEAN_NAME_EMBEDDED_CASSANDRA;
+import static com.playtika.test.cassandra.CassandraProperties.DEFAULT_DATACENTER;
+import static com.playtika.test.common.utils.FileUtils.resolveTemplate;
 import static com.playtika.test.common.utils.ContainerUtils.containerLogsConsumer;
 import static com.playtika.test.common.utils.ContainerUtils.startAndLogTime;
 
 @Slf4j
 @Configuration
-@AutoConfigureOrder(Ordered.HIGHEST_PRECEDENCE)
+@AutoConfigureOrder
+@ConditionalOnExpression("${embedded.containers.enabled:true}")
 @ConditionalOnProperty(name = "embedded.cassandra.enabled", matchIfMissing = true)
 @EnableConfigurationProperties(CassandraProperties.class)
 @RequiredArgsConstructor
 public class EmbeddedCassandraBootstrapConfiguration {
 
+    private final ResourceLoader resourceLoader;
 
     @Bean(name = BEAN_NAME_EMBEDDED_CASSANDRA, destroyMethod = "stop")
     public GenericContainer cassandra(ConfigurableEnvironment environment,
-                                  CassandraProperties properties) {
+                                  CassandraProperties properties) throws Exception {
 
         log.info("Starting Cassandra cluster. Docker image: {}", properties.dockerImage);
 
-        GenericContainer cassandra =
-                new FixedHostPortGenericContainer(properties.dockerImage)
-                        .withEnv("CASSANDRA_DC", properties.getDatacenter())
-                        .withEnv("CASSANDRA_ENDPOINT_SNITCH", "GossipingPropertyFileSnitch")
-                        .withExposedPorts(properties.port)
-                        .withLogConsumer(containerLogsConsumer(log))
-                        .withStartupTimeout(properties.getTimeoutDuration());
+        prepareCassandraInitScript(properties);
+
+        GenericContainer cassandra = new CassandraContainer(properties.dockerImage)
+                .withInitScript("cassandra-init.sql")
+                .withLogConsumer(containerLogsConsumer(log))
+                .withExposedPorts(properties.getPort());
         startAndLogTime(cassandra);
-        CassandraEnv cassandraEnv = registerCassandraEnvironment(environment, cassandra, properties);
-        createKeySpace(cassandraEnv);
+        Map<String, Object> cassandraEnv = registerCassandraEnvironment(environment, cassandra, properties);
+
         log.info("Started Cassandra. Connection details: {}", cassandraEnv);
         return cassandra;
     }
 
-    static CassandraEnv registerCassandraEnvironment(ConfigurableEnvironment environment,
-                                                     GenericContainer cassandra,
-                                                     CassandraProperties properties) {
+    static Map<String, Object> registerCassandraEnvironment(ConfigurableEnvironment environment,
+                                                            GenericContainer cassandra,
+                                                            CassandraProperties properties) {
         String host = cassandra.getContainerIpAddress();
         Integer mappedPort = cassandra.getMappedPort(properties.getPort());
-        CassandraEnv cassandraEnv = new CassandraEnv(host, mappedPort, properties.datacenter, properties.keyspaceName);
-        MapPropertySource propertySource = new MapPropertySource("embeddedCassandraInfo", cassandraEnv.toMap());
+        LinkedHashMap<String, Object> cassandraEnv = new LinkedHashMap<>();
+        cassandraEnv.put("embedded.cassandra.port", mappedPort);
+        cassandraEnv.put("embedded.cassandra.host", host);
+        cassandraEnv.put("embedded.cassandra.datacenter", DEFAULT_DATACENTER);
+        cassandraEnv.put("embedded.cassandra.keyspace-name", properties.keyspaceName);
+        MapPropertySource propertySource = new MapPropertySource("embeddedCassandraInfo", cassandraEnv);
         environment.getPropertySources().addFirst(propertySource);
         return cassandraEnv;
     }
 
-    static void createKeySpace(CassandraEnv cassandraEnv) {
-        try (CqlSession session = CqlSession.builder()
-                .addContactPoint(new InetSocketAddress(cassandraEnv.getHost(), cassandraEnv.getPort()))
-                .withLocalDatacenter(cassandraEnv.getDatacenter())
-                .build()) {
-
-            String createKeyspaceQuery = "CREATE KEYSPACE " + cassandraEnv.getKeyspaceName()
-                    + " WITH REPLICATION = { 'class':'SimpleStrategy', 'replication_factor' : 3 }";
-            session.execute(createKeyspaceQuery);
-        }
+    private void prepareCassandraInitScript(CassandraProperties properties) throws Exception {
+        resolveTemplate(resourceLoader, "cassandra-init.sql", content -> content
+                .replace("{{keyspaceName}}", properties.keyspaceName));
     }
 }
